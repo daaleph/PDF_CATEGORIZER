@@ -1,0 +1,8 @@
+# **Fist version**
+Working for general analysis to know how most books for psychollogy, mathematics, and computer science are featured by Anna's archive. What's the scope of this? Break books in their chapters, a *better and next version* would be: break extensive chapters in their subchapters for any book knowing their characteristic features
+
+## Next versions
+For a broader analysis use the following prompt
+```
+I got analysis procedures for categorizing and measuring categories proportions within the datasets. Which other other perspectives would you suggest showing the dataset for analysis in a more complete way to understand better the features, characteristics, specifications and patterns of each category and how they're important in the entire dataset? My intention is to write an algorithm extractor of elements with physical pagination using pdftk <file>.pdf cat <starting_page>-<end_page> output <element-extracted>.pdf. For example, I think about a graph that creates hierarchical classes as combinations of unique pdf features, properties, characteristics, or patterns, then a gradient of colors as the leveling representation to know how frequent a class by instances within the dataset where must be represented in such graph not only the classes that never inherit but also the most used classes by inheritance (basic or combined) to make in such way a broader analysis of what is more important to be applied in the next algorithm extractor of elements with physical pagination
+```
