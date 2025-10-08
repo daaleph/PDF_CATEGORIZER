@@ -18,7 +18,7 @@ from ai_classifier import generate_classification_prompt
 from get_gemini_response import get_gemini_response
 
 # --- Configuration ---
-SCAN_DIRECTORIES = ["MATH"]
+SCAN_DIRECTORIES = ["BOOKS"]
 OUTPUT_FILE = "book_classifications.jsonl"
 FORCE_REPROCESS = False
 
