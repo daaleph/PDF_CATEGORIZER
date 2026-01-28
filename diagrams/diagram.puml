@@ -1,0 +1,61 @@
+@startuml
+title **PDF Segmentation Pipeline Architecture**
+header LLM-Powered Command Generation
+footer System Workflow - Version 1.0
+
+skinparam backgroundColor #FDFDFD
+skinparam handwriting true
+skinparam defaultFontName "Apex"
+skinparam activity {
+  BorderColor #555555
+  BackgroundColor LightGreen
+  ArrowColor #333333
+}
+skinparam partition {
+  BackgroundColor #F0F0F0
+  BorderColor #AAAAAA
+}
+skinparam note {
+  BackgroundColor #FFEFE0
+  BorderColor #C0C000
+}
+
+start
+
+partition "segmentation_pipe.py (Orchestrator)" {
+  :Read 'book_classifications.jsonl';
+  :Filter for 'safe' books\n(analysis_type == "metadata_check");
+  if (Any books were skipped?) then (yes)
+    partition "File System" {
+      :Log skipped book paths to 'logs/skipped_books.txt';
+    }
+  endif
+  repeat
+    :Get next "safe" book from queue;
+    fork
+      partition "External Tools" {
+        :Execute `extract_chapter.py`\nto get bookmark JSON;
+      }
+    fork again
+      partition "External Tools" {
+        :Execute `pdftk dump_data`\nto get total page count;
+      }
+    end fork
+    :Construct prompt with\nbookmark data and rules;
+    partition "Gemini API" {
+      :Send prompt via `get_gemini_response.py`\nand receive structured JSON;
+    }
+    if (Response is valid JSON?) then (yes)
+      partition "External Tools" {
+        :Execute `pdftk cat` commands;
+      }
+    else (no)
+      partition "File System" {
+        :Log failure with API error;
+      }
+    endif
+  repeat while (More safe books in queue?) is (yes)
+}
+
+stop
+@enduml

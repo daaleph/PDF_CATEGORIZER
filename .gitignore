@@ -1,0 +1,14 @@
+.env
+.venv/
+__pycache__/
+*.pdf
+*_BOOKS/
+BOOKS/
+STRATEGY.md
+diagrams/plantuml.jar
+book_classifications.jsonl
+PDF_CATEGORIZER_context.txt
+contextualizer.ps1
+segmented_output/
+venv/
+.env
