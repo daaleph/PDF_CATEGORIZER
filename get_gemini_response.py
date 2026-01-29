@@ -17,30 +17,39 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-# --- API Key Configuration ---
-# The list of keys provided in the prompt, mapped in sequential order.
-API_KEYS = [
-    "AIzaSyBzEFcmZyCPmCrQi_ogXK0TpdlBsmxWePs", # GEMINI_API_KEY_D
-    "AIzaSyD9myFJkZ7fr-2az5vcwbBRK_jro_OX8RY", # GEMINI_API_KEY_M
-    "AIzaSyBuESGsJaE5tw2NsbTuR8KbtmUeEiPfEdw", # GEMINI_API_KEY_N_1
-    "AIzaSyB1dbpi8TKr0Es-Z5pIKFovnlNoUthNGmA", # GEMINI_API_KEY_N_P1
-    "AIzaSyC9yPtCmGT66GdeEv54PtgFtGlYm6xkI0w",
-    "AIzaSyCCJBUkLqTLqZUMUiKNjBz8gXv2KuVI-zA",
-    "AIzaSyAnMobQefL_aW4zjP5g789ZWtSlaHVchyo", # GEMINI_API_KEY_N_2
-    "AIzaSyCkGtw5JRjwh2I-7bhPFph851szetsrOmE", # GEMINI_API_KEY_N_P2
-    "AIzaSyCIwbZa1gUifhDW4ZbNq2L5d1jc229sq9I", # GEMINI_API_KEY_N_3
-    "AIzaSyDJ1RaWuv2ssFA-9ZY6OYeLIgwEawLOl8s"  # GEMINI_API_KEY_N_P3
-]
-
 # Load environment variables
 logging.info("Loading environment variables from .env file...")
 load_dotenv()
 
 # --- SDK Configuration ---
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_API_KEY_M=os.getenv("GEMINI_API_KEY_M")
+GEMINI_API_KEY_D=os.getenv("GEMINI_API_KEY_D")
+GEMINI_API_KEY_N_1=os.getenv("GEMINI_API_KEY_N_1")
+GEMINI_API_KEY_N_P1=os.getenv("GEMINI_API_KEY_N_P1")
+GEMINI_API_KEY_U1=os.getenv("GEMINI_API_KEY_U1")
+GEMINI_API_KEY_U2=os.getenv("GEMINI_API_KEY_U2")
+GEMINI_API_KEY_N_2=os.getenv("GEMINI_API_KEY_N_2")
+GEMINI_API_KEY_N_P2=os.getenv("GEMINI_API_KEY_N_P2")
+GEMINI_API_KEY_N_3=os.getenv("GEMINI_API_KEY_N_3")
+GEMINI_API_KEY_N_P3=os.getenv("GEMINI_API_KEY_N_P3")
 
-if not API_KEYS:
-    logging.critical("Error: API_KEYS list is empty. Exiting.")
+# --- API Key Configuration ---
+# The list of keys provided in the prompt, mapped in sequential order.
+API_KEYS = [
+    GEMINI_API_KEY_M,
+    GEMINI_API_KEY_D,
+    GEMINI_API_KEY_N_1,
+    GEMINI_API_KEY_N_P1,
+    GEMINI_API_KEY_U1,
+    GEMINI_API_KEY_U2,
+    GEMINI_API_KEY_N_2,
+    GEMINI_API_KEY_N_P2,
+    GEMINI_API_KEY_N_3,
+    GEMINI_API_KEY_N_P3
+]
+
+if not GEMINI_API_KEY_M and GEMINI_API_KEY_N_1 and GEMINI_API_KEY_N_P1 and GEMINI_API_KEY_N_2 and GEMINI_API_KEY_N_P2 and GEMINI_API_KEY_N_3 and GEMINI_API_KEY_N_P3=os.getenv("GEMINI_API_KEY_N_P3"):
+    logging.critical("Error: API_KEYS list is not full. Exiting.")
     exit(1)
 else:
     logging.info(f"Loaded {len(API_KEYS)} API keys for rotation.")
