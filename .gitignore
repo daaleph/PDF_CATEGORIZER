@@ -7,6 +7,8 @@ BOOKS/
 STRATEGY.md
 diagrams/plantuml.jar
 book_classifications.jsonl
+ai_context.txt
+*_context.txt
 PDF_CATEGORIZER_context.txt
 contextualizer.ps1
 segmented_output/
