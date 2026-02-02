@@ -1,69 +1,78 @@
 # prompt_generator.py (Improved)
-import json
+import json, os
+
 
 def generate_segmentation_prompt(bookmark_data: list, pdftk_metadata: list, total_pages: int, pdf_path: str) -> str:
     """
-    Constructs a detailed, structured, and unambiguous prompt for the Gemini API 
-    to request pdftk commands for segmenting a book into individual components.
+    Construye un prompt altamente estricto y reforzado para forzar el esquema JSON exacto con las claves nuevas,
+    placeholders consistentes (IN_FILE / OUT_FILE) y justificación breve.
+    Incluye ejemplos claros de lo que es correcto e incorrecto para evitar cualquier desviación.
     """
-    # This prompt has been heavily revised for clarity and to prevent chapter aggregation.
-    prompt_rules = """
-You are a master PDF document analyst. Your sole task is to generate a JSON object containing a list of `pdftk` command-line instructions. These commands will segment a book PDF into its core components based on the provided bookmark data (Table of Contents).
+    
+    # Convertir los bookmarks a string JSON legible (sin truncar demasiado)
+    bookmarks_json = json.dumps(bookmark_data, indent=2, ensure_ascii=False)
 
-**Your Primary Goal:**
-Analyze the bookmark data to identify the precise start and end page for each distinct component of the book.
+    # Información opcional de pdftk (puede ser None)
+    pdftk_info = ""
+    if pdftk_metadata:
+        pdftk_info = f"- pdftk metadata lines: {' | '.join(pdftk_metadata)}\n"
 
-**Required Components to Identify (if present):**
-- Title Page (Mandatory, almost always page 1)
-- Table of Contents (Mandatory)
-- Foreword
-- Preface
-- Dedication
-- Acknowledgments
-- **Each individual Chapter** (CRITICAL: Every chapter must be a separate entry)
-- **Each individual Appendix** (CRITICAL: Every appendix must be a separate entry)
-- Glossary
-- Bibliography / References
-- Index
+    prompt = f"""
+You are an expert PDF segmentation engineer specializing in generating precise, executable `pdftk` commands from bookmark structures.
 
----
-**CRITICAL OUTPUT RULES**
----
-1.  **JSON ONLY:** Your entire response MUST be a single, valid JSON object. Do not wrap it in markdown, code ticks, or add any explanatory text outside of the JSON structure itself.
-2.  **ROOT STRUCTURE:** The JSON object must have a single root key named `"segmentation_commands"`, which contains a list of command objects.
-3.  **COMMAND OBJECT STRUCTURE:** Each object in the `"segmentation_commands"` list must have exactly three string keys:
-    - `"component_name"`: A file-safe name for the output PDF. Use leading zeros for sorting (e.g., "00_Title_Page", "01_Table_of_Contents", "05_Chapter_03_Methodology").
-    - `"pdftk_command"`: The precise `pdftk IN_FILE cat START-END output OUT_FILE` command. You must use the literal placeholders "IN_FILE" and "OUT_FILE".
-    - `"justification"`: A brief, single-sentence explanation of how you determined the page range using the bookmark titles.
+TASK:
+Analyze the provided bookmark hierarchy and total page count, then generate a JSON array of objects that define how to split the PDF into logical components (front matter, each chapter/section, appendices, bibliography, index, etc.).
 
-4.  **CRITICAL RULE - NO CHAPTER AGGREGATION:** You **MUST** generate a separate command object for each individual chapter. For instance, if you identify "Chapter 1", "Chapter 2", and "Chapter 3", you must output three distinct command objects in the list. **NEVER group chapters** (e.g., "Chapters 1-3") into a single command. This is the most important rule.
+CRITICAL RULES:
+1. Output ONLY a valid JSON array. No explanatory text, no markdown fences, no extra characters before or after the array.
+2. Each object in the array MUST have EXACTLY these three keys:
+   - "component_name": string → Clean, filesystem-safe name for the section (no extension, no invalid chars like / \\ : * ? " < > |). Use numbering like "01_", "02_" for ordering.
+   - "pdftk_command": string → The exact `pdftk` command using placeholders:
+        - Use "IN_FILE" instead of the real input path.
+        - Use "OUT_FILE" instead of the real output path.
+        - Format: "pdftk IN_FILE cat START-END output OUT_FILE" (or "cat START" if single page).
+   - "justification": string → Brief one-sentence reason for the chosen page range (e.g., "Starts at bookmark page X, ends just before next bookmark at Y").
+3. DO NOT use any other keys (no "command", "filename", "page_range", "title", etc.).
+4. Cover the entire document without gaps or overlaps unless explicitly justified.
+5. Prioritize individual extraction of: Front Cover, Title Page, Table of Contents, Preface/Acknowledgements, EACH CHAPTER, Appendices, Bibliography/References, Index, Back Cover.
 
-5.  **PAGE RANGE LOGIC:**
-    - The end page of a component is the page number immediately before the start page of the very next component.
-    - The very last component in the book (e.g., the final chapter or appendix) must end at the `total_pages` number.
-    - Infer components like a "Title Page" or "Copyright Page" from the page gap between the start of the PDF and the first major bookmark (like "Table of Contents").
+DATA PROVIDED:
+- File: {os.path.basename(pdf_path)}
+- Total Pages: {total_pages}
+{pdftk_info}- Bookmarks (title, page, level):
+{bookmarks_json}
 
-6.  **BE CONSERVATIVE:** If the provided bookmark data is too sparse, ambiguous, or corrupted to confidently determine the page ranges for the mandatory components, you MUST return an empty list for the `"segmentation_commands"` value. It is better to fail safely (`"segmentation_commands": []`) than to guess and produce incorrect segments.
+EXAMPLES OF CORRECT OUTPUT:
+[
+  {{
+    "component_name": "00_Front_Cover",
+    "pdftk_command": "pdftk IN_FILE cat 1 output OUT_FILE",
+    "justification": "Page 1 has no bookmark and is visually the cover."
+  }},
+  {{
+    "component_name": "01_Title_Page",
+    "pdftk_command": "pdftk IN_FILE cat 2-3 output OUT_FILE",
+    "justification": "Title and copyright pages before Table of Contents bookmark at page 4."
+  }},
+  {{
+    "component_name": "02_Table_of_Contents",
+    "pdftk_command": "pdftk IN_FILE cat 4-8 output OUT_FILE",
+    "justification": "Bookmark 'Contents' starts at page 4 and ends just before Chapter 1 at page 9."
+  }},
+  {{
+    "component_name": "03_Chapter_01_Introduction",
+    "pdftk_command": "pdftk IN_FILE cat 9-25 output OUT_FILE",
+    "justification": "Chapter 1 bookmark at page 9; next chapter starts at page 26."
+  }}
+]
 
----
-**INPUT DATA**
----
+EXAMPLES OF INCORRECT OUTPUT (DO NOT DO THIS):
+- Using wrong keys: "command", "filename", "page_range"
+- Adding extra keys
+- Including markdown fences like ```json
+- Adding explanations outside the JSON
+- Using real file paths instead of IN_FILE/OUT_FILE
 
-**1. Total Pages in PDF:**
-{total_pages}
-
-**2. Bookmark Data (from PyPDF or similar):**
-```json
-{bookmark_json_string}
-```
-
-**3. Pdftk Metadata (additional context):**
-```json
-{pdftk_json_string}
-```
+Generate the JSON array now based on the provided bookmark data:
 """
-    return prompt_rules.format(
-        total_pages=total_pages,
-        bookmark_json_string=json.dumps(bookmark_data, separators=(',', ':')), 
-        pdftk_json_string=json.dumps(pdftk_metadata, separators=(',', ':'))
-    )
+    return prompt

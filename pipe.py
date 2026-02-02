@@ -6,6 +6,7 @@ Master orchestration script for the Book Categorizer project.
 Enhanced with file size logging for risky files.
 """
 
+import logging
 import os
 import json
 import argparse
@@ -54,80 +55,207 @@ def get_file_size_mb(pdf_path: str) -> float:
     except:
         return 0
 
-def process_single_book(pdf_path: str):
+def classify_book_structure(pdf_path: str, evidence_data: dict) -> dict:
     """
-    Runs the full analysis and classification pipeline for a single book.
+    Envía las evidencias extraídas (metadatos y layout) al modelo Gemini
+    para obtener la clasificación estructural del libro.
+    
+    Esta función actúa como el puente entre el análisis local y la IA.
     """
-    size_mb = get_file_size_mb(pdf_path)
-    if size_mb > 50:
-        print(f"  -> WARNING: Large file ({size_mb:.1f} MB) - may timeout.")
+    logging.info(f"--- Iniciando Clasificación IA para: {os.path.basename(pdf_path)} ---")
+
+    # 1. Construcción del Prompt (Mantiene la riqueza algorítmica original)
+    # Se define la estructura de salida esperada para asegurar el parseo JSON
+    system_instruction = """
+    You are an expert PDF document archivist. Analyze the provided evidence to classify the structural complexity of the book.
+    Return a valid JSON object with exactly two keys:
+    1. "classification": String (e.g., "Level 1", "Level 2", "Level 5").
+    2. "justification": String explaining why this level fits the evidence.
+    """
+
+    user_prompt = f"""
+    Based on the evidence below, classify the book '{os.path.basename(pdf_path)}'.
     
-    print("\n" + "="*80)
-    print(f"Processing: {pdf_path} ({size_mb:.1f} MB)")
-    print("="*80)
-
-    # Stage 1: Metadata Check
-    metadata_evidence = check_book_metadata(pdf_path)
-
-    # This dictionary will hold all evidence sent to the AI
-    final_evidence = metadata_evidence.copy()
-
-    # Stage 2: Layout Analysis (if needed)
-    if metadata_evidence.get("next_step") == "run_layout_analysis":
-        layout_evidence = analyze_book_layout(pdf_path)
-        if layout_evidence:
-            # Merge layout evidence into the final evidence payload
-            final_evidence.update(layout_evidence)
-        else:
-            print(f"-> WARNING: Layout analysis failed for {pdf_path}. Proceeding with metadata only.")
-
-    # Stage 3: AI Classification
-    print("\n--- Generating AI Prompt ---")
-    prompt = generate_classification_prompt(final_evidence)
+    Evidence Data:
+    {json.dumps(evidence_data, indent=2)}
     
-    ai_response = {
-        "classification": "ERROR",
-        "justification": "Failed to get response from AI.",
-        "raw_output": ""
-    }
+    Classification Levels Guide:
+    - Level 1: Simple Linear Monograph (Flat structure, standard metadata).
+    - Level 2: Standard Hierarchical Textbook (Good metadata, nested bookmarks).
+    - Level 3: Handbook (Flat but long metadata, mixed layout).
+    - Level 4: Reference Manual (Complex layout, dense metadata).
+    - Level 5: Inferred Structure / Broken Metadata (No bookmarks, reliance on layout analysis).
     
+    Output strictly the JSON object.
+    """
+
     try:
-        raw_response = get_gemini_response(prompt, "gemini-2.5-flash")
-        print(f"RAW RESPONSE: {raw_response}")
-        ai_response["raw_output"] = raw_response
+        # 2. Llamada a la API con Estrategia de Tareas (El ajuste crítico)
+        # Se utiliza task_type='classification' para activar la lista de modelos 
+        # ligeros y eficientes definida en get_gemini_response.py
+        raw_response = get_gemini_response(
+            prompt=user_prompt,
+            system_instruction=system_instruction, # Nota: Asegúrate de que tu función acepte esto o pásalo en 'contents'
+            model='gemini-2.5-flash', # Modelo de preferencia inicial
+            task_type='classification'  # <--- ACTIVACIÓN DE LA RESILIENCIA ESTRATÉGICA
+        )
+
+        # 3. Validación y Parseo de la Respuesta (Cohesión con el sistema)
+        # A veces el modelo devuelve texto antes del JSON, limpiamos si es necesario
+        # (Aunque get_gemini_response devuelve .text.strip(), añadimos una capa extra de seguridad)
         
-        # Parse the structured response from the AI
-        level_line = ""
-        justification_line = ""
-        for line in raw_response.splitlines():
-            if line.upper().startswith("LEVEL:"):
-                level_line = line.split(":", 1)[1].strip()
-            elif line.upper().startswith("JUSTIFICATION:"):
-                justification_line = line.split(":", 1)[1].strip()
-        
-        if level_line:
-            ai_response["classification"] = level_line
-            ai_response["justification"] = justification_line
-        else:
-            ai_response["justification"] = "AI response was not in the expected format."
+        try:
+            # Intento directo de parseo JSON
+            result = json.loads(raw_response)
+            
+            # Validación de campos obligatorios
+            if "classification" not in result or "justification" not in result:
+                raise ValueError("Missing keys in JSON response")
+                
+            logging.info(f"Clasificación exitosa: {result['classification']}")
+            return result
+
+        except json.JSONDecodeError as json_err:
+            logging.error(f"Error de sintaxis JSON en la respuesta de la IA: {json_err}")
+            logging.debug(f"Respuesta cruda recibida: {raw_response[:200]}...")
+            
+            # Intento de recuperación: buscar el objeto JSON dentro del texto si falló el strip directo
+            start = raw_response.find('{')
+            end = raw_response.rfind('}') + 1
+            if start != -1 and end > start:
+                try:
+                    recovered_json = json.loads(raw_response[start:end])
+                    logging.warning("JSON recuperado mediante limpieza de caracteres extra.")
+                    return recovered_json
+                except:
+                    pass
+            
+            # Si falla todo, devolvemos una estructura de error controlada
+            return {
+                "classification": "Unknown",
+                "justification": f"JSON Parsing Error: {str(json_err)}"
+            }
 
     except Exception as e:
-        print(f"-> ERROR: AI classification failed for {pdf_path}.", file=sys.stderr)
-        print(f"   Details: {e}", file=sys.stderr)
-        ai_response["justification"] = f"An exception occurred: {str(e)}"
+        logging.error(f"Excepción crítica durante la clasificación de {pdf_path}: {e}", exc_info=True)
+        # Estructura de fallo para mantener la integridad del pipeline downstream
+        return {
+            "classification": "Error",
+            "justification": str(e)
+        }
 
-    print("\n--- Classification Result ---")
-    print(f"  Level: {ai_response['classification']}")
-    print(f"  Justification: {ai_response['justification']}")
+def process_single_book(pdf_path: str, output_jsonl_path: str) -> dict:
+    """
+    Procesa un único libro PDF: extrae evidencia técnica, clasifica mediante IA
+    y persiste el resultado en el archivo .jsonl principal.
 
-    # Combine all data into a single record
-    final_record = {
-        "file_path": pdf_path,
-        "classification_result": ai_response,
-        "final_evidence": final_evidence,
+    Args:
+        pdf_path (str): Ruta completa al archivo PDF.
+        output_jsonl_path (str): Ruta al archivo donde se guardarán los resultados.
+
+    Returns:
+        dict: El resultado final procesado (incluyendo evidencia y clasificación).
+    """
+    logging.info(f"--- Procesando libro: {os.path.basename(pdf_path)} ---")
+
+    # 1. Inicialización de la estructura de evidencia
+    # Esta estructura contiene los datos "duros" que la IA analizará.
+    evidence_data = {
+        'file_path': pdf_path,
+        'file_size_mb': round(os.path.getsize(pdf_path) / (1024 * 1024), 2),
+        'analysis_type': 'pending', 
+        'has_pypdf_outline': False,
+        'pypdf_outline_depth': 0,
+        'pypdf_outline_length': 0,
+        'distinct_font_sizes': 0,
+        'page_number_style_transition_found': False
     }
 
-    return final_record
+    try:
+        # 2. Fase de Análisis Técnico (Extracción de Evidencia)
+        # Estrategia: Primero intentar metadatos (rápido), luego layout (visual) si falla.
+        
+        # --- Intento 1: Análisis de Metadatos (Bookmarks) ---
+        try:
+            # Esto asume que check_pdf_bookmarks devuelve un dict con las claves esperadas
+            # o lanza una excepción si no encuentra nada.
+            # Se adapta a las claves definidas en 'evidence_data' para coherencia.
+            metadata_result = check_pdf_bookmarks(pdf_path)
+            
+            if metadata_result and metadata_result.get('has_bookmarks'):
+                evidence_data.update(metadata_result)
+                evidence_data['analysis_type'] = 'metadata_check'
+                logging.info("Análisis exitoso vía metadatos (bookmarks).")
+            else:
+                raise ValueError("No bookmarks found or metadata invalid.")
+                
+        except Exception as metadata_error:
+            logging.warning(f"Análisis de metadatos falló o vacío: {metadata_error}")
+            logging.info("Pasando a análisis de layout (visual)...")
+
+            # --- Intento 2: Análisis de Layout (Visual Heuristics) ---
+            try:
+                # Asumimos que analyze_pdf_layout devuelve fuentes, transiciones, etc.
+                layout_result = analyze_pdf_layout(pdf_path)
+                
+                if layout_result:
+                    evidence_data.update(layout_result)
+                    evidence_data['analysis_type'] = 'layout_analysis'
+                    logging.info("Análisis exitoso vía layout (visual).")
+                else:
+                    raise ValueError("Layout analysis returned no data.")
+                    
+            except Exception as layout_error:
+                logging.error(f"Análisis de layout también falló: {layout_error}")
+                # Dejamos analysis_type como 'failed' o 'unknown' para que la IA lo maneje
+                evidence_data['analysis_type'] = 'analysis_failed'
+
+        # 3. Fase de Clasificación con IA (Integración del nuevo método)
+        # Aquí es donde llamamos al método ajustado previamente.
+        classification_result = classify_book_structure(pdf_path, evidence_data)
+
+        # 4. Consolidación de Resultados Finales
+        final_record = {
+            "file_path": pdf_path,
+            "final_evidence": evidence_data,
+            "classification_result": classification_result
+        }
+
+        # 5. Persistencia Atómica en JSONL
+        # Usamos modo 'append' para acumular resultados de múltiples libros.
+        try:
+            with open(output_jsonl_path, 'a', encoding='utf-8') as f:
+                # ensure_ascii=False para preservar caracteres especiales en títulos de libros
+                f.write(json.dumps(final_record, ensure_ascii=False) + '\n')
+        except IOError as io_err:
+            logging.error(f"Error escribiendo en {output_jsonl_path}: {io_err}")
+            # Relanzamos para detener el pipe si hay error de disco
+            raise
+
+        logging.info(f"Clasificación completada y guardada para: {os.path.basename(pdf_path)}")
+        return final_record
+
+    except Exception as e:
+        # Manejo robusto de errores para no detener el procesamiento de todo el lote
+        logging.error(f"Excepción crítica en process_single_book para {pdf_path}: {e}", exc_info=True)
+        
+        # Opcional: Guardar registro del fallo en el JSONL para auditoría
+        fail_record = {
+            "file_path": pdf_path,
+            "final_evidence": evidence_data,
+            "classification_result": {
+                "classification": "System Error",
+                "justification": f"Pipeline crashed: {str(e)}"
+            }
+        }
+        
+        try:
+            with open(output_jsonl_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(fail_record, ensure_ascii=False) + '\n')
+        except:
+            pass # Ignorar error de escritura si ya estamos en un estado de fallo
+            
+        return fail_record
 
 
 def main():

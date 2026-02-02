@@ -1,327 +1,276 @@
-# segmentation_pipe.py (Enhanced with Quick Fixes)
-
 #!/usr/bin/env python3
 """
-Master orchestration script for the LLM-Powered PDF Segmentation Pipeline.
-Enhanced with PyMuPDF slicing fallback, password cache, and partial success logging.
+Segmentation Pipe: Executes the second phase of the PDF processing pipeline.
+Iterates over 'safe' books (those with valid metadata), uses AI to generate 
+pdftk commands via `get_gemini_response` with strategic model rotation, 
+and splits the PDFs into chapter-level files.
 """
 
 import os
 import json
 import subprocess
-import argparse
-import sys
-import pandas as pd
-import re
-import time
-from datetime import datetime, UTC
-import fitz  # For fallback slicing
+import logging
+import pypdf
+from datetime import datetime
 
-# --- System Components ---
+# Importaciones del proyecto
 from get_gemini_response import get_gemini_response
 from prompt_generator import generate_segmentation_prompt
-from extract_chapter import get_chapter_data, get_pdftk_metadata, remove_pdf_password_if_needed, get_page_count
 
-# --- Configuration ---
-OUTPUT_DIR = "segmented_output"
-LOGS_DIR = "logs"
-SEGMENTATION_LOG_FILE = os.path.join(LOGS_DIR, "segmentation.jsonl")
-SKIPPED_LOG_FILE = os.path.join(LOGS_DIR, "skipped_books.txt")
-CLASSIFICATIONS_FILE = "book_classifications.jsonl"
+# --- Configuración de Rutas ---
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+CLASSIFICATIONS_FILE = os.path.join(PROJECT_ROOT, "book_classifications.jsonl")
+OUTPUT_DIR_BASE = os.path.join(PROJECT_ROOT, "segmented_output", "BOOKS")
+SEGMENTATION_LOG_FILE = os.path.join(PROJECT_ROOT, "logs", "segmentation_log.jsonl")
 
-# Quick Fix 3: Password Cache
-password_cache = {}  # {pdf_path: removed_status}
+# --- Configuración de Logging ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler()
+    ]
+)
 
-def get_cached_password_removal(pdf_path):
-    if pdf_path not in password_cache:
-        password_cache[pdf_path] = remove_pdf_password_if_needed(pdf_path)
-    return password_cache[pdf_path]
+os.makedirs(os.path.dirname(SEGMENTATION_LOG_FILE), exist_ok=True)
 
-def setup_directories():
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    os.makedirs(LOGS_DIR, exist_ok=True)
 
-def load_processed_files() -> set:
-    if not os.path.exists(SEGMENTATION_LOG_FILE):
-        return set()
-    processed = set()
-    with open(SEGMENTATION_LOG_FILE, 'r', encoding='utf-8') as f:
-        for line in f:
-            try:
-                data = json.loads(line)
-                if data.get('status') == 'SUCCESS':
-                    processed.add(data['file_path'])
-            except json.JSONDecodeError:
-                continue
-    return processed
-
-def get_total_pages(pdf_path: str) -> int:
+def segment_single_book(pdf_path: str, output_base_dir: str, classification_data: dict) -> dict:
     """
-    Wrapper for enhanced get_page_count with fallback.
+    Orquesta la segmentación de un único libro: extrae marcadores, genera prompt con IA,
+    parsea comandos y ejecuta pdftk para crear los archivos segmentados.
     """
-    # Quick Fix 3: Use cached password removal
-    password_removed = get_cached_password_removal(pdf_path)
-    if password_removed:
-        print("  -> Password removed (cached); proceeding with page count.")
-    return get_page_count(pdf_path)
-
-def get_fallback_page_count(pdf_path: str) -> int:
-    """
-    PyMuPDF fallback for total pages if pdftk fully fails.
-    """
-    try:
-        doc = fitz.open(pdf_path)
-        return len(doc)
-    except Exception as e:
-        print(f"  -> PyMuPDF fallback failed for '{pdf_path}': {e}", file=sys.stderr)
-        return 0
-
-def log_result(file_path, status, message, commands_executed=0, commands_total=0):
-    log_entry = {
-        "timestamp": datetime.now(UTC).isoformat() + "Z",
-        "file_path": file_path,
-        "status": status,
-        "message": message,
-        "commands_executed": commands_executed,
-        "commands_total": commands_total,
-    }
-    with open(SEGMENTATION_LOG_FILE, 'a', encoding='utf-8') as f:
-        f.write(json.dumps(log_entry) + '\n')
-
-def sanitize_filename(name):
-    """Removes invalid characters for file and directory names."""
-    return re.sub(r'[<>:"/\\|?*\']', '_', name)
-
-# Quick Fix 2: PyMuPDF Slicing Fallback Function
-def extract_pages_pymupdf(pdf_path: str, start: int, end: int, output_filename: str) -> bool:
-    """
-    Fallback: Extract page range using PyMuPDF.
-    start/end 1-indexed.
-    """
-    try:
-        doc = fitz.open(pdf_path)
-        output_doc = fitz.open()
-        for p in range(start - 1, min(end, len(doc))):
-            output_doc.insert_pdf(doc, from_page=p, to_page=p)
-        output_doc.save(output_filename)
-        output_doc.close()
-        doc.close()
-        return True
-    except Exception as e:
-        print(f"  -> PyMuPDF slicing error: {e}")
-        return False
-
-def main():
-    parser = argparse.ArgumentParser(description="Run the full PDF segmentation pipeline.")
-    parser.add_argument('--force', action='store_true', help='Force reprocessing of all files.')
-    args = parser.parse_args()
-
-    setup_directories()
+    logging.info(f"--- Iniciando Segmentación para: {os.path.basename(pdf_path)} ---")
     
-    print("--- Starting PDF Segmentation Pipeline ---")
+    # 1. Preparación de Directorios de Salida
+    book_folder_name = os.path.splitext(os.path.basename(pdf_path))[0]
+    dest_folder = os.path.join(output_base_dir, book_folder_name)
     
     try:
-        # --- ROBUST LOADING LOGIC ---
-        records = []
-        with open(CLASSIFICATIONS_FILE, 'r', encoding='utf-8') as f:
-            full_content = f.read()
-        corrected_content = full_content.replace('}{', '}\n{')
-        for line in corrected_content.splitlines():
-            if not line.strip():
-                continue
-            try:
-                data = json.loads(line)
-                record = {
-                    'file_path': data.get('file_path'),
-                    **data.get('classification_result', {}),
-                    **data.get('final_evidence', {})
-                }
-                records.append(record)
-            except json.JSONDecodeError as e:
-                print(f"WARNING: Skipping malformed JSON in '{CLASSIFICATIONS_FILE}': {e}", file=sys.stderr)
+        os.makedirs(dest_folder, exist_ok=True)
+        logging.info(f"Directorio de salida creado/verificado: {dest_folder}")
+    except OSError as e:
+        logging.error(f"Error creando directorio {dest_folder}: {e}")
+        return {"status": "failed", "reason": f"Directory creation failed: {e}"}
+
+    try:
+        # 2. Extracción de Bookmarks (ToC) del PDF
+        reader = pypdf.PdfReader(pdf_path)
         
-        if not records:
-            print(f"FATAL: No valid records in '{CLASSIFICATIONS_FILE}'.")
-            sys.exit(1)
-
-        df = pd.DataFrame(records)
-
-    except Exception as e:
-        print(f"FATAL: Could not parse '{CLASSIFICATIONS_FILE}': {e}", file=sys.stderr)
-        sys.exit(1)
-
-    processed_files = set() if args.force else load_processed_files()
-    if not args.force:
-        print(f"Found {len(processed_files)} previous successes. Skipping.")
-
-    safe_mask = (df['analysis_type'] == 'metadata_check') & (~df['file_path'].isin(processed_files))
-    safe_queue = df[safe_mask]
-    unsafe_queue = df[~safe_mask]
-
-    print(f"Found {len(safe_queue)} new books to process.")
-    
-    with open(SKIPPED_LOG_FILE, 'w', encoding='utf-8') as f:
-        f.write(f"# Skipped Books Log - {datetime.now(UTC).isoformat()}\n")
-        for _, row in unsafe_queue.iterrows():
-            reason = "Already processed" if row['file_path'] in processed_files else f"analysis_type '{row['analysis_type']}'"
-            f.write(f"{row['file_path']} | REASON: {reason}\n")
-    print(f"Logged {len(unsafe_queue)} skips to '{SKIPPED_LOG_FILE}'.")
-
-    for i, (_, book) in enumerate(safe_queue.iterrows()):
-        pdf_path = book['file_path']
-        print("\n" + "="*80)
-        print(f"Processing ({i+1}/{len(safe_queue)}): {pdf_path}")
-        print("="*80)
-        
-        # Quick Fix 3: Cached password removal
-        password_removed = get_cached_password_removal(pdf_path)
-        if password_removed:
-            print("  -> Password removed (cached); retrying extraction.")
-        
-        print("  - Extracting bookmark data (PyPDF)...")
-        try:
-            bookmark_data = get_chapter_data(pdf_path)
-        except Exception as e:
-            print(f"  -> WARNING: PyPDF failed for '{pdf_path}': {e}", file=sys.stderr)
-            bookmark_data = None
+        # Función auxiliar recursiva robusta
+        def extract_bookmarks(outline, level=0):
+            items = []
             
-        print("  - Extracting pdftk metadata...")
-        try:
-            pdftk_metadata = get_pdftk_metadata(pdf_path)
-        except Exception as e:
-            print(f"  -> WARNING: pdftk failed for '{pdf_path}': {e}", file=sys.stderr)
-            pdftk_metadata = None
-        
-        # Use PyPDF as primary; pdftk secondary
-        if pdftk_metadata and bookmark_data:
-            metadata_to_use = pdftk_metadata  # Prefer pdftk if both
-        elif bookmark_data:
-            print("  -> Using PyPDF-only metadata.")
-            metadata_to_use = bookmark_data
-            pdftk_metadata = None  # Flag for prompt
-        elif pdftk_metadata:
-            metadata_to_use = pdftk_metadata
-        else:
-            log_result(pdf_path, "FAILURE", "No metadata from PyPDF or pdftk.")
-            continue
-            
-        print("  - Getting total page count...")
-        total_pages = get_total_pages(pdf_path)
-        if total_pages == 0:
-            print("  -> pdftk page count failed. Falling back to PyMuPDF.")
-            total_pages = get_fallback_page_count(pdf_path)
-            if total_pages == 0:
-                log_result(pdf_path, "FAILURE", "No page count from any source.")
-                continue
-            print(f"  -> Fallback page count: {total_pages}")
-        
-        # Proceed even with partial metadata
-        if not metadata_to_use:
-            log_result(pdf_path, "FAILURE", "No usable metadata after fallbacks.")
-            continue
-        
-        try:
-            # Adjust prompt for partial data
-            prompt = generate_segmentation_prompt(
-                bookmark_data if bookmark_data else metadata_to_use,
-                pdftk_metadata,
-                total_pages,
-                pdf_path
-            )
-            raw_response = get_gemini_response(prompt, 'gemini-2.5-flash')
-            cleaned_response = raw_response.replace("```json\n", "").replace("```", "")
-            try:
-                response_json = json.loads(cleaned_response)
-            except Exception as e:
-                print(f"  -> LLM parse error: {e}. Retrying with gemini-3-flash.")
-                raw_response = get_gemini_response(prompt, 'gemini-3-flash')
-                cleaned_response = raw_response.replace("```json\n", "").replace("```", "")
-                response_json = json.loads(cleaned_response)
-            
-            if not response_json.get("segmentation_commands"):
-                print("  -> Empty commands from LLM. Retrying with 2.5 pro model.")
-                raw_response = get_gemini_response(prompt, 'gemini-2.5-pro')
-                cleaned_response = raw_response.replace("```json\n", "").replace("```", "")
-                response_json = json.loads(cleaned_response)
-            
-            if not response_json.get("segmentation_commands"):
-                print("  -> Empty commands from LLM. Retrying with pro model.")
-                raw_response = get_gemini_response(prompt, 'gemini-3-pro-preview')
-                cleaned_response = raw_response.replace("```json\n", "").replace("```", "")
-                response_json = json.loads(cleaned_response)
-                
-        except Exception as e:
-            log_result(pdf_path, "FAILURE", f"LLM error: {e}")
-            print(f"  -> ERROR: LLM failed: {e}", file=sys.stderr)
-            continue
+            if not hasattr(outline, '__iter__'):
+                return items
 
-        commands = response_json.get("segmentation_commands", [])
-        if not isinstance(commands, list):
-            log_result(pdf_path, "FAILURE", "Invalid LLM structure.")
-            print("  -> ERROR: Invalid LLM JSON.")
-            continue
-            
-        if not commands:
-            log_result(pdf_path, "SUCCESS", "LLM skipped due to insufficient metadata.")
-            print("  -> INFO: LLM skipped safely.")
-            continue
-
-        commands_executed_count = 0
-        try:
-            base_name = sanitize_filename(os.path.splitext(os.path.basename(pdf_path))[0])
-            # Handle relative path for output dir
-            book_output_dir_parts = pdf_path.split(os.sep)[:-1]  # Use os.sep for cross-platform
-            book_output_dir = os.path.join(OUTPUT_DIR, *book_output_dir_parts, base_name)
-            os.makedirs(book_output_dir, exist_ok=True)
-            print(f"  - Output directory: {book_output_dir}")
-
-            for cmd_obj in commands:
-                component_name = sanitize_filename(cmd_obj['component_name'])
-                pdftk_command_template = cmd_obj['pdftk_command']
-                output_filename = os.path.join(book_output_dir, f"{component_name}.pdf")
-                final_command = pdftk_command_template.replace("IN_FILE", f'"{pdf_path}"').replace("OUT_FILE", f'"{output_filename}"')
-                
-                print(f"    - Executing: {final_command}")
-                success = False
-                # Quick Fix 2: pdftk with fallback
+            for item in outline:
                 try:
-                    subprocess.run(final_command, shell=True, check=True, capture_output=True, timeout=120)
-                    success = True
-                except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-                    print(f"    -> pdftk failed for {component_name}: {e}. Trying PyMuPDF fallback...")
-                    # Parse page range from command (e.g., "cat 1-5" -> start=1, end=5)
-                    page_match = re.search(r'cat\s+(\d+)-?(\d*)', final_command)
-                    if page_match:
-                        start = int(page_match.group(1))
-                        end = int(page_match.group(2)) if page_match.group(2) else get_total_pages(pdf_path)
-                        success = extract_pages_pymupdf(pdf_path, start, end, output_filename)
-                        if success:
-                            print(f"    -> PyMuPDF fallback succeeded for {component_name} (pages {start}-{end}).")
-                        else:
-                            print(f"    -> PyMuPDF fallback failed for {component_name}.")
+                    page_num = reader.get_destination_page_number(item) + 1
+                except Exception:
+                    page_num = -1
                 
-                if success:
-                    commands_executed_count += 1
+                current = {
+                    "title": getattr(item, 'title', 'Untitled'),
+                    "page": page_num,
+                    "level": level,
+                    "type": str(type(item).__name__)
+                }
+                items.append(current)
+                
+                children = getattr(item, 'children', None)
+                
+                if isinstance(children, list) and children:
+                    items.extend(extract_bookmarks(children, level + 1))
+                
+                elif callable(children):
+                    try:
+                        potential_list = children()
+                        if isinstance(potential_list, list) and potential_list:
+                            items.extend(extract_bookmarks(potential_list, level + 1))
+                    except:
+                        pass
 
-            # Quick Fix 4: Accurate logging with threshold
-            partial_success = (commands_executed_count / len(commands)) >= 0.5 if commands else False
-            status = "SUCCESS" if partial_success else "PARTIAL_FAILURE"
-            message = f"Segmentation partial ({commands_executed_count}/{len(commands)} extracted)."
-            log_result(pdf_path, status, message, commands_executed_count, len(commands))
-            if not partial_success:
-                print("  -> PARTIAL FAILURE: <50% components extracted. Review log.")
+            return items
+
+        outline_data = extract_bookmarks(reader.outline)
+        
+        if not outline_data:
+            raise ValueError("No bookmarks found or extracted successfully. Cannot proceed with segmentation.")
+
+        # 3. Total de páginas y metadatos auxiliares
+        total_pages = len(reader.pages)
+
+        # 4. Generación del Prompt
+        segmentation_prompt = generate_segmentation_prompt(
+            bookmark_data=outline_data,
+            pdftk_metadata=None,  # Opcional, según tu prompt_generator
+            total_pages=total_pages,
+            pdf_path=pdf_path
+        )
+
+        # 5. Llamada a la API con estrategia de tareas
+        raw_response = get_gemini_response(
+            prompt=segmentation_prompt,
+            model='gemini-2.5-flash',
+            task_type='segmentation'
+        )
+
+        # 6. Parseo de la Respuesta JSON (robusto ante markdown)
+        try:
+            start_idx = raw_response.find('[')
+            end_idx = raw_response.rfind(']') + 1
+            
+            if start_idx == -1 or end_idx == 0:
+                raise ValueError("No valid JSON array found in response")
+                
+            commands_list = json.loads(raw_response[start_idx:end_idx])
+            
+            if not isinstance(commands_list, list):
+                raise ValueError("Root element of JSON is not a list")
+
+        except Exception as parse_err:
+            logging.error(f"Error parseando JSON de segmentación: {parse_err}")
+            logging.debug(f"Respuesta cruda: {raw_response}")
+            return {
+                "status": "failed", 
+                "reason": f"JSON Parsing Failed: {parse_err}", 
+                "raw_response": raw_response
+            }
+
+        # 7. Ejecución de Comandos pdftk
+        successful_segments = 0
+        failed_segments = []
+
+        for cmd_obj in commands_list:
+            # Support both old and new schemas
+            if 'pdftk_command' in cmd_obj:
+                pdftk_cmd = cmd_obj['pdftk_command']
+                component_name = cmd_obj.get('component_name', 'Unknown_Component')
+            elif 'command' in cmd_obj:
+                pdftk_cmd = cmd_obj['command']
+                component_name = cmd_obj.get('filename', 'Unknown_Component').replace('.pdf', '')
             else:
-                print("  -> SUCCESS: Book segmented.")
-                print("  -> Throttling: Sleeping 10s to cool down API keys...")
-                time.sleep(10)
+                logging.warning(f"Objeto de comando inválido (falta comando): {cmd_obj}")
+                continue
 
-        except Exception as e:
-            error_details = str(e)
-            log_result(pdf_path, "FAILURE", f"Execution failed: {error_details}", commands_executed_count, len(commands))
-            print(f"  -> ERROR: Execution failed: {error_details}", file=sys.stderr)
-            continue
+            # Build a safe filename
+            safe_filename = "".join(c for c in component_name if c.isalnum() or c in (' ', '-', '_')).strip()
+            if not safe_filename.endswith('.pdf'):
+                safe_filename += '.pdf'
+            if not safe_filename.replace('.pdf', '').strip():
+                safe_filename = f"Unknown_Component_{commands_list.index(cmd_obj):02d}.pdf"
 
-    print("\n--- Pipeline Finished ---")
+            output_path = os.path.join(dest_folder, safe_filename)
+            full_cmd_str = pdftk_cmd.replace("IN_FILE", f'"{pdf_path}"').replace("OUT_FILE", f'"{output_path}"')
+            
+            logging.info(f"Ejecutando: {full_cmd_str}")
+            
+            try:
+                result = subprocess.run(
+                    full_cmd_str, 
+                    shell=True, 
+                    check=True, 
+                    capture_output=True, 
+                    text=True,
+                    timeout=180
+                )
+                successful_segments += 1
+                
+            except subprocess.CalledProcessError as e:
+                logging.error(f"Error ejecutando pdftk para {safe_filename}: {e.stderr}")
+                failed_segments.append(safe_filename)
+            except subprocess.TimeoutExpired:
+                logging.error(f"Timeout ejecutando pdftk para {safe_filename}")
+                failed_segments.append(safe_filename)
+
+        # 8. Reporte de Resultados
+        logging.info(f"Segmentación finalizada. Éxitos: {successful_segments}, Fallos: {len(failed_segments)}")
+        
+        status = "success" if successful_segments > 0 else "failed"
+        if successful_segments > 0 and failed_segments:
+            status = "partial_success"
+            
+        return {
+            "status": status,
+            "total_commands": len(commands_list),
+            "successful_segments": successful_segments,
+            "failed_segments": failed_segments,
+            "output_dir": dest_folder
+        }
+
+    except Exception as e:
+        logging.error(f"Error general en segmentación de {pdf_path}: {e}", exc_info=True)
+        return {"status": "crashed", "reason": str(e)}
+
+
+def run_segmentation_pipeline(classifications_file: str, base_output_dir: str):
+    """
+    Itera sobre el archivo de clasificaciones y segmenta los libros con marcadores válidos.
+    """
+    logging.info("Iniciando Pipeline de Segmentación...")
+    
+    if not os.path.exists(classifications_file):
+        logging.error(f"Archivo {classifications_file} no encontrado. Ejecuta pipe.py primero.")
+        return
+
+    books_to_process = []
+    try:
+        with open(classifications_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                record = json.loads(line)
+                evidence = record.get('final_evidence', {})
+                if evidence.get('has_pypdf_outline') is True:
+                    books_to_process.append(record)
+    except Exception as e:
+        logging.error(f"Error leyendo clasificaciones: {e}")
+        return
+
+    logging.info(f"Libros elegibles para segmentación: {len(books_to_process)}")
+    
+    if not books_to_process:
+        logging.warning("No hay libros elegibles para segmentación.")
+        return
+
+    results_summary = []
+    
+    for index, record in enumerate(books_to_process, 1):
+        pdf_path = record['file_path']
+        classification = record.get('classification_result', {}).get('classification', 'Unknown')
+        
+        logging.info(f"[{index}/{len(books_to_process)}] Procesando: {classification} - {os.path.basename(pdf_path)}")
+        
+        result = segment_single_book(
+            pdf_path=pdf_path,
+            output_base_dir=base_output_dir,
+            classification_data=record
+        )
+        
+        result['file_path'] = pdf_path
+        result['classification'] = classification
+        result['timestamp'] = datetime.utcnow().isoformat() + "Z"
+        results_summary.append(result)
+
+    # Persistencia del log
+    try:
+        with open(SEGMENTATION_LOG_FILE, 'w', encoding='utf-8') as f:
+            for res in results_summary:
+                f.write(json.dumps(res, ensure_ascii=False) + '\n')
+        logging.info(f"Log de segmentación guardado en {SEGMENTATION_LOG_FILE}")
+    except Exception as e:
+        logging.error(f"Error guardando log: {e}")
+
+    success_count = sum(1 for r in results_summary if r.get('status') in ('success', 'partial_success'))
+    logging.info(f"Pipeline completado. Éxitos totales: {success_count}/{len(books_to_process)}")
+
 
 if __name__ == "__main__":
-    main()
+    # Verificación de pdftk
+    try:
+        subprocess.run(["pdftk", "--version"], check=True, capture_output=True, text=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        logging.critical("ERROR: 'pdftk' no está instalado o no está en el PATH.")
+    else:
+        run_segmentation_pipeline(CLASSIFICATIONS_FILE, OUTPUT_DIR_BASE)
