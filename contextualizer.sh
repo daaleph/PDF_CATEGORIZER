@@ -1,32 +1,56 @@
 #!/bin/bash
 # ==============================================================================
 # AI Context Generator Script
+#
+# Description:
+# This script creates a single text file (`ai_context.txt`) containing the
+# directory tree and the contents of all relevant source code files in the
+# current project directory. This is ideal for providing context to an AI model.
+#
+# Instructions:
+# 1. Place this script in the root directory of your project.
+# 2. Make it executable: chmod +x contextualizer.sh
+# 3. Run it without arguments for default behavior:
+#       ./contextualizer.sh
+# 4. Or pass additional directories to ignore completely:
+#       ./contextualizer.sh FILES FINAL node_modules otra_carpeta
+# 5. The `ai_context.txt` file will be created in the same directory.
 # ==============================================================================
+
+# --- Parse command-line arguments for extra directories to ignore ---
+EXTRA_IGNORE_DIRS=()
+while [[ $# -gt 0 ]]; do
+    EXTRA_IGNORE_DIRS+=("$1")
+    shift
+done
+
 # --- Configuration ---
 OUTPUT_FILE="ai_context.txt"
 
-# Directories to ignore completely in both the tree and file content.
-IGNORE_DIRS_TREE="node_modules|public|.next|.open-next|.wrangler|.git|dist|build|vendor|__pycache__|.venv|venv|.git|.idea|.vscode"
-IGNORE_DIRS_FIND=("node_modules" "public" ".next" ".open-next" ".wrangler" ".git" "dist" "build" "vendor" "__pycache__" ".venv" "venv" ".idea" ".vscode")
+# Directorios ignorados por defecto
+DEFAULT_IGNORE_DIRS=("node_modules" "public" ".next" ".open-next" ".wrangler" ".git" "dist" "build" "vendor" "__pycache__" ".venv" "venv" ".idea" ".vscode")
 
-# Specific files to ignore.
+# Combinamos los predeterminados con los pasados como argumentos
+IGNORE_DIRS_FIND=("${DEFAULT_IGNORE_DIRS[@]}" "${EXTRA_IGNORE_DIRS[@]}")
+
+# Para el comando `tree` (formato separado por |)
+IGNORE_DIRS_TREE=$(printf "%s|" "${DEFAULT_IGNORE_DIRS[@]}" "${EXTRA_IGNORE_DIRS[@]}")
+IGNORE_DIRS_TREE=${IGNORE_DIRS_TREE%|}  # Eliminamos el último |
+
+# Archivos específicos a ignorar
 IGNORE_FILES=("package-lock.json")
-
-# File extensions to include.
-INCLUDE_EXTENSIONS=(
-  "js" "jsx" "ts" "tsx" "html" "css" "scss" "sass" "less"
-  "php" "go" "java" "c" "cpp" "h" "hpp" "cs"
-  "json" "yml" "yaml" "xml" "md" "sql" "puml" "py" "rb"
-  "Dockerfile" "docker-compose.yml" "package.json" "tsconfig.json" ".env.example"
-)
 
 # --- Script Logic ---
 echo "🚀 Starting AI context generation..."
 
-# Clear the output file.
+if [ ${#EXTRA_IGNORE_DIRS[@]} -gt 0 ]; then
+  echo "📂 Ignorando directorios adicionales: ${EXTRA_IGNORE_DIRS[*]}"
+fi
+
+# Limpiamos el archivo de salida si ya existe
 > "$OUTPUT_FILE"
 
-# 1. Add a header.
+# 1. Cabecera
 {
   echo "================================================="
   echo "PROJECT CONTEXT FOR AI ANALYSIS"
@@ -41,9 +65,8 @@ echo "🚀 Starting AI context generation..."
   echo ""
 } >> "$OUTPUT_FILE"
 
-# 2. Generate tree.
-if command -v tree &> /dev/null
-then
+# 2. Árbol de directorios
+if command -v tree &> /dev/null; then
   echo "🌳 Generating file tree..."
   ignore_patterns_tree="${IGNORE_DIRS_TREE}|${OUTPUT_FILE}"
   for file in "${IGNORE_FILES[@]}"; do
@@ -51,10 +74,11 @@ then
   done
   tree -a -I "$ignore_patterns_tree" >> "$OUTPUT_FILE"
 else
-  echo "⚠️ 'tree' command not found." >> "$OUTPUT_FILE"
+  echo "⚠️ 'tree' command not found. Skipping directory tree generation." >> "$OUTPUT_FILE"
+  echo " For a better context, please install 'tree' (e.g., 'sudo apt-get install tree' or 'brew install tree')." >> "$OUTPUT_FILE"
 fi
 
-# 3. Separator.
+# 3. Separador antes del código
 {
   echo ""
   echo ""
@@ -64,15 +88,14 @@ fi
   echo ""
 } >> "$OUTPUT_FILE"
 
-# 4. Find and process files.
-echo "🔍 Finding and processing source files..."
+# 4. Buscar y procesar archivos de texto/fuente (detección automática)
+echo "🔍 Finding and processing text/source files..."
 
-# Build prune conditions
+# Lógica de pruning (evita entrar en directorios ignorados)
 prune_ors=()
 for dir in "${IGNORE_DIRS_FIND[@]}"; do
   prune_ors+=(-o -name "$dir")
 done
-
 if [ ${#prune_ors[@]} -gt 0 ]; then
   prune_inner="( -false ${prune_ors[@]} )"
   prune_part="( -type d $prune_inner -prune ) -o"
@@ -80,78 +103,73 @@ else
   prune_part=""
 fi
 
-# Build include conditions
-include_ors=()
-for ext in "${INCLUDE_EXTENSIONS[@]}"; do
-  if [[ "$ext" == *.* ]] || [[ "$ext" == "Dockerfile" ]]; then
-    name="$ext"
-  else
-    name="*.$ext"
-  fi
-  include_ors+=(-o -name "$name")
-done
-
-if [ ${#include_ors[@]} -eq 0 ]; then
-  echo "❌ No file patterns to include."
-  exit 1
+# Ignorar archivos específicos
+ignore_part=""
+if [ ${#IGNORE_FILES[@]} -gt 0 ]; then
+  ignore_ands=()
+  first=true
+  for file in "${IGNORE_FILES[@]}"; do
+    if [ "$first" = true ]; then
+      ignore_ands+=(-not -name "$file")
+      first=false
+    else
+      ignore_ands+=(-a -not -name "$file")
+    fi
+  done
+  ignore_part="${ignore_ands[*]}"
 fi
 
-include_inner="( -false ${include_ors[@]} )"
-
-# Build ignore conditions
-ignore_ands=()
-for file in "${IGNORE_FILES[@]}"; do
-  ignore_ands+=(-a -not -name "$file")
-done
-ignore_part="${ignore_ands[*]}"
-
-# --- CRITICAL FIX: Disable Globbing ---
-# We disable shell globbing so wildcards like *.py are passed to 'find' literally,
-# instead of being expanded by the shell into a list of filenames.
-set -f
-
-# Execute find
+# Búsqueda principal
 find . \
   ${prune_part} \
   -type f \
-  \( $include_inner \) \
   ${ignore_part} \
   -not -path "./$OUTPUT_FILE" \
   -print0 |
 while IFS= read -r -d '' file; do
-  extension="${file##*.}"
-  if [[ -z "$extension" ]] || [[ "$extension" == "$file" ]]; then
+  # Detectar solo archivos de texto/script con `file`
+  if file --brief "$file" | grep -Eq 'text|script|empty'; then
+    echo " -> Processing: $file"
+
+    # Hint de lenguaje a partir de la extensión (o nombre si no tiene)
+    extension="${file##*.}"
+    if [[ -z "$extension" ]] || [[ "$extension" == "$file" ]]; then
       extension="${file##*/}"
+    fi
+    lang_hint="${extension,,}"
+
+    # Refinamientos comunes
+    case "$lang_hint" in
+      js|jsx) lang_hint="javascript" ;;
+      ts|tsx) lang_hint="typescript" ;;
+      py) lang_hint="python" ;;
+      sh|bash) lang_hint="bash" ;;
+      ps1) lang_hint="powershell" ;;
+      md) lang_hint="markdown" ;;
+      yml|yaml) lang_hint="yaml" ;;
+      json) lang_hint="json" ;;
+      gitignore) lang_hint="gitignore" ;;
+      license) lang_hint="text" ;;
+      dockerfile) lang_hint="dockerfile" ;;
+      *) lang_hint="text" ;;
+    esac
+
+    # Añadir al archivo de salida
+    {
+      echo "========================================="
+      echo "FILE: ${file#./}"
+      echo "========================================="
+      echo "\`\`\`${lang_hint}"
+      cat "$file"
+      echo ""
+      echo "\`\`\`"
+      echo ""
+      echo ""
+    } >> "$OUTPUT_FILE"
+  else
+    echo " -> Skipping non-text file: $file"
   fi
-  lang_hint="${extension,,}"
-  
-  case "$lang_hint" in
-    js|jsx) lang_hint="javascript" ;;
-    ts|tsx) lang_hint="typescript" ;;
-    puml|plantuml) lang_hint="plantuml" ;;
-    py) lang_hint="python" ;;
-    rb) lang_hint="ruby" ;;
-    md) lang_hint="markdown" ;;
-    yml|yaml) lang_hint="yaml" ;;
-    sh) lang_hint="bash" ;;
-    dockerfile) lang_hint="dockerfile" ;;
-  esac
-  
-  echo " -> Processing: $file"
-  {
-    echo "========================================="
-    echo "FILE: ${file#./}"
-    echo "========================================="
-    echo "\`\`\`${lang_hint}"
-    cat "$file"
-    echo ""
-    echo "\`\`\`"
-    echo ""
-    echo ""
-  } >> "$OUTPUT_FILE"
 done
 
-# Re-enable globbing (good practice, though script ends here)
-set +f
-
 echo "✅ Success! Context saved to '$OUTPUT_FILE'."
+echo "➡️ You can now copy the contents of this file into the AI prompt."

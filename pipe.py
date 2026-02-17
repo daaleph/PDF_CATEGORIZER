@@ -15,7 +15,6 @@ import sys
 # --- Import your custom modules ---
 from metadata_checker import check_book_metadata
 from layout_analyzer import analyze_book_layout
-from ai_classifier import generate_classification_prompt
 from get_gemini_response import get_gemini_response
 
 # --- Configuration ---
@@ -180,7 +179,7 @@ def process_single_book(pdf_path: str, output_jsonl_path: str) -> dict:
             # Esto asume que check_pdf_bookmarks devuelve un dict con las claves esperadas
             # o lanza una excepción si no encuentra nada.
             # Se adapta a las claves definidas en 'evidence_data' para coherencia.
-            metadata_result = check_pdf_bookmarks(pdf_path)
+            metadata_result = check_book_metadata(pdf_path)
             
             if metadata_result and metadata_result.get('has_bookmarks'):
                 evidence_data.update(metadata_result)
@@ -195,8 +194,7 @@ def process_single_book(pdf_path: str, output_jsonl_path: str) -> dict:
 
             # --- Intento 2: Análisis de Layout (Visual Heuristics) ---
             try:
-                # Asumimos que analyze_pdf_layout devuelve fuentes, transiciones, etc.
-                layout_result = analyze_pdf_layout(pdf_path)
+                layout_result = analyze_book_layout(pdf_path)
                 
                 if layout_result:
                     evidence_data.update(layout_result)
@@ -291,8 +289,8 @@ def main():
             if pdf_path in processed_files:
                 print(f"({i+1}/{total_files}) Skipping already processed file: {pdf_path}")
                 continue
-                
-            result_record = process_single_book(pdf_path)
+            
+            result_record = process_single_book(pdf_path, "book_classifications.jsonl")
             
             if result_record:
                 # Write the result as a single line of JSON

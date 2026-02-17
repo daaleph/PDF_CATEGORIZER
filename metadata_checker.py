@@ -37,20 +37,31 @@ def check_book_metadata(pdf_path):
         print(f"-> WARNING: pdftk failed for '{pdf_path}': {e}")
         has_pdftk_metadata = False
 
+    # Use PyPDF bookmarks if available, otherwise fallback to PDFTK bookmarks
+    final_bookmarks = bookmarks if bookmarks else pdftk_metadata
+    has_valid_bookmarks = bool(final_bookmarks)
+
     evidence = {
         "file": pdf_path,
         "analysis_type": "metadata_check",
+        
+        # This is the KEY that pipe.py looks for:
+        "has_bookmarks": has_valid_bookmarks, 
+        
+        # Unify stats so the AI sees the depth/length regardless of source
+        "outline_depth": max(b['level'] for b in final_bookmarks) + 1 if final_bookmarks else 0,
+        "outline_length": len(final_bookmarks),
+        
+        # Keep original details for debugging
         "has_pypdf_outline": bool(bookmarks),
-        "pypdf_outline_depth": max(b['level'] for b in bookmarks) + 1 if bookmarks else 0,
-        "pypdf_outline_length": len(bookmarks),
         "has_pdftk_metadata": has_pdftk_metadata,
     }
 
-    if not bookmarks and not has_pdftk_metadata:
+    if not has_valid_bookmarks:
         print("-> Metadata check FAILED. Proceed to layout.")
         evidence["next_step"] = "run_layout_analysis"
     else:
-        print("-> Metadata check PASSED.")
+        print(f"-> Metadata check PASSED. (Source: {'PyPDF' if bookmarks else 'PDFTK'})")
         evidence["next_step"] = "classify_with_ai"
 
     return evidence

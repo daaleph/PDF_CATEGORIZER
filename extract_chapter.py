@@ -230,6 +230,10 @@ def get_pdftk_metadata(pdf_path, max_retries: int = 3):
     
     for retry in range(max_retries):
         try:
+            # --- DEBUG LOG START ---
+            print(f"\n[DEBUG] Running pdftk on: {abs_pdf_path}")
+            # --- DEBUG LOG END ---
+
             # Use binary capture
             result = subprocess.run(
                 ["pdftk", abs_pdf_path, "dump_data_utf8"],
@@ -237,9 +241,19 @@ def get_pdftk_metadata(pdf_path, max_retries: int = 3):
                 check=True,
                 timeout=120
             )
+
             # Manually decode
             stdout_decoded = result.stdout.decode('utf-8', errors='replace')
             lines = stdout_decoded.splitlines()
+
+            # --- DEBUG LOG START ---
+            print(f"[DEBUG] pdftk return code: {result.returncode}")
+            print(f"[DEBUG] Output length: {len(stdout_decoded)} chars")
+            print(f"[DEBUG] First 10 lines of output:")
+            for l in lines[:10]:
+                print(f"   | {l}")
+            # --- DEBUG LOG END ---
+
             chapter_data = []
             current_bookmark = {}
 
@@ -251,6 +265,7 @@ def get_pdftk_metadata(pdf_path, max_retries: int = 3):
                 elif line.startswith("BookmarkLevel: "):
                     try:
                         current_bookmark["level"] = int(line[len("BookmarkLevel: "):]) - 1
+                        print(f"[DEBUG] Found Title: {current_bookmark['title']}")
                     except ValueError:
                         continue
                 elif line.startswith("BookmarkPageNumber: "):
@@ -260,6 +275,13 @@ def get_pdftk_metadata(pdf_path, max_retries: int = 3):
                         continue
                     if "title" in current_bookmark and "page" in current_bookmark and "level" in current_bookmark:
                         chapter_data.append(current_bookmark)
+                        print(f"[DEBUG] Appended bookmark: {current_bookmark['title']}")
+            
+            # --- DEBUG LOG START ---
+            print(f"[DEBUG] Total bookmarks extracted: {len(chapter_data)}")
+            if len(chapter_data) == 0 and len(lines) > 0:
+                print("[DEBUG] WARNING: pdftk output exists but no bookmarks were parsed. Check 'startswith' strings.")
+            # --- DEBUG LOG END ---
 
             return chapter_data
         except subprocess.TimeoutExpired:

@@ -8,6 +8,7 @@ import os
 import time
 import random
 import logging
+import requests
 from dotenv import load_dotenv
 import google.genai as genai
 
@@ -24,19 +25,30 @@ load_dotenv()
 # --- SDK Configuration ---
 GEMINI_API_KEY_N=os.getenv("GEMINI_API_KEY_N")
 GEMINI_API_KEY_D=os.getenv("GEMINI_API_KEY_D")
-GEMINI_API_KEY_Di=os.getenv("GEMINI_API_KEY_Di")
+GEMINI_API_KEY_DI=os.getenv("GEMINI_API_KEY_Di")
 GEMINI_API_KEY_A=os.getenv("GEMINI_API_KEY_A")
 
 # --- API Key Configuration ---
 API_KEYS = [
     GEMINI_API_KEY_N,
     GEMINI_API_KEY_D,
-    GEMINI_API_KEY_Di,
+    GEMINI_API_KEY_DI,
     GEMINI_API_KEY_A
 ]
 
 if not all(API_KEYS):
     logging.warning("Warning: One or more API keys are missing.")
+
+# --- LOCAL LLM FALLBACK CONFIGURATION ---
+# This activates ONLY when all Gemini keys are exhausted.
+LOCAL_LLM_CONFIG = {
+    "enabled": True,  # Set to False to disable local fallback
+    "provider": "ollama",
+    "url": "http://localhost:11434/api/generate",
+    # 'qwen3:1.7b' or 'qwen2.5:1.5b' fits easily in 16GB RAM on CPU
+    "model": "qwen3:1.7b", 
+    "timeout": 300  # 5 minutes timeout for slow CPU inference
+}
 
 # --- STRATEGIC MODEL SELECTION CONFIGURATION ---
 # Define lists based on task complexity and cost (Free Tier logic).
@@ -48,7 +60,6 @@ MODEL_STRATEGIES = {
     # Prioriza velocidad y modelos con alta cuota gratuita.
     "classification": [
         'gemini-2.5-flash',     # Rápido, inteligente, balanceado (Primary)
-        'gemini-1.5-flash',     # Cuota separada, muy rápido (Backup)
         'gemini-2.5-flash-lite', # Modelo liviano para evitar parada total (Emergency)
         'gemini-2.5-pro'        # Solo si todo lo demás falla (Last Resort)
     ],
@@ -74,7 +85,51 @@ MAX_CYCLES = 10
 INITIAL_BACKOFF_SECONDS = 60
 MAX_BACKOFF_SECONDS = 600
 
-def get_gemini_response(prompt: str, model: str = None, task_type: str = "default") -> str:
+def get_local_response(prompt: str, system_instruction: str = None) -> str:
+    """
+    Queries the local Ollama instance. 
+    This is the 'Final Resilience Layer'.
+    """
+    if not LOCAL_LLM_CONFIG["enabled"]:
+        return None
+
+    logging.info(f"Activating Local Fallback: Querying {LOCAL_LLM_CONFIG['model']} on CPU...")
+
+    # Combine system and prompt for the local model context
+    full_prompt = prompt
+    if system_instruction:
+        full_prompt = f"SYSTEM INSTRUCTION:\n{system_instruction}\n\nUSER PROMPT:\n{prompt}"
+
+    try:
+        payload = {
+            "model": LOCAL_LLM_CONFIG["model"],
+            "prompt": full_prompt,
+            "stream": False,
+            "options": {
+                "num_ctx": 8192  # Ensure context window is sufficient
+            }
+        }
+        
+        response = requests.post(
+            LOCAL_LLM_CONFIG["url"], 
+            json=payload, 
+            timeout=LOCAL_LLM_CONFIG["timeout"]
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            generated_text = result.get("response", "").strip()
+            logging.info("SUCCESS: Local CPU Fallback returned a response.")
+            return generated_text
+        else:
+            logging.error(f"Local LLM error: {response.status_code} - {response.text}")
+            return None
+            
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Failed to connect to Local LLM (Ollama): {e}")
+        return None
+
+def get_gemini_response(prompt: str, model: str = None, task_type: str = "default", system_instruction: str = None) -> str:
     """
     Sends a prompt to the Google Gemini API with Strategic Model Rotation.
     
@@ -116,9 +171,14 @@ def get_gemini_response(prompt: str, model: str = None, task_type: str = "defaul
                     )
                     
                     client = genai.Client(api_key=api_key)
+                    # Combine system instruction and prompt if instruction is present
+                    final_contents = prompt
+                    if system_instruction:
+                        final_contents = f"SYSTEM INSTRUCTION:\n{system_instruction}\n\nUSER PROMPT:\n{prompt}"
+                    
                     response = client.models.generate_content(
                         model=current_model,
-                        contents=prompt
+                        contents=final_contents
                     )
                     
                     if response.text:
@@ -159,7 +219,14 @@ def get_gemini_response(prompt: str, model: str = None, task_type: str = "defaul
             )
             time.sleep(wait_time)
         else:
-            raise RuntimeError("Exhausted all retries.")
+            # RETRIES EXHAUSTED: ACTIVATE LOCAL FALLBACK
+            logging.critical("All Cloud retries exhausted. Activating Local CPU Resilience Layer...")
+            local_response = get_local_response(prompt, system_instruction)
+            
+            if local_response:
+                return local_response
+            else:
+                raise RuntimeError("Exhausted all cloud retries and Local LLM failed or is disabled.")
 
         cycle_count += 1
 
